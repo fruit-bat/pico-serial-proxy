@@ -19,28 +19,6 @@
 
 #define BUFFER_SIZE 1024
 
-struct proxy_state {
-    int real_fd;
-    int virt_master_fd;
-    int virt_slave_fd;
-    char *virt_tty_path;
-    void *cb_context;
-    pico_serial_proxy_data_cb_t data_cb;
-    pico_serial_proxy_lifecycle_cb_t lifecycle_cb;
-    volatile sig_atomic_t stop_requested;
-};
-
-static struct proxy_state state = {
-    .real_fd = -1,
-    .virt_master_fd = -1,
-    .virt_slave_fd = -1,
-    .virt_tty_path = NULL,
-    .cb_context = NULL,
-    .data_cb = NULL,
-    .lifecycle_cb = NULL,
-    .stop_requested = 0,
-};
-
 static int baud_rate_to_speed(int baud, speed_t *speed) {
     switch (baud) {
         case 0: *speed = B0; return 0;
@@ -102,178 +80,213 @@ static ssize_t write_all(int fd, const void *buffer, size_t len) {
     return (ssize_t)len;
 }
 
-int pico_serial_proxy_init(const char *real_tty_path,
-                           int baud_rate,
-                           void *cb_context,
-                           pico_serial_proxy_data_cb_t data_cb,
-                           pico_serial_proxy_lifecycle_cb_t lifecycle_cb) {
-    if (!real_tty_path || !data_cb) {
+static void proxy_state_init(pico_serial_proxy_t *proxy) {
+    if (!proxy) {
+        return;
+    }
+
+    proxy->real_fd = -1;
+    proxy->virt_master_fd = -1;
+    proxy->virt_slave_fd = -1;
+    proxy->virt_tty_path = NULL;
+    proxy->cb_context = NULL;
+    proxy->data_cb = NULL;
+    proxy->lifecycle_cb = NULL;
+    proxy->stop_requested = 0;
+}
+
+int pico_serial_proxy_init(
+    pico_serial_proxy_t *proxy,
+    const char *real_tty_path,
+    int baud_rate,
+    void *cb_context,
+    pico_serial_proxy_data_cb_t data_cb,
+    pico_serial_proxy_lifecycle_cb_t lifecycle_cb
+) {
+    if (!proxy || !real_tty_path || !data_cb) {
         errno = EINVAL;
         return -1;
     }
 
-    state.real_fd = open(real_tty_path, O_RDWR | O_NOCTTY);
-    if (state.real_fd < 0) {
+    proxy_state_init(proxy);
+
+    proxy->real_fd = open(real_tty_path, O_RDWR | O_NOCTTY);
+    if (proxy->real_fd < 0) {
         return -1;
     }
 
-    if (configure_serial_fd(state.real_fd, baud_rate) != 0) {
-        close(state.real_fd);
-        state.real_fd = -1;
+    if (configure_serial_fd(proxy->real_fd, baud_rate) != 0) {
+        close(proxy->real_fd);
+        proxy->real_fd = -1;
         return -1;
     }
 
-    state.virt_master_fd = posix_openpt(O_RDWR | O_NOCTTY);
-    if (state.virt_master_fd < 0) {
-        close(state.real_fd);
-        state.real_fd = -1;
+    proxy->virt_master_fd = posix_openpt(O_RDWR | O_NOCTTY);
+    if (proxy->virt_master_fd < 0) {
+        close(proxy->real_fd);
+        proxy->real_fd = -1;
         return -1;
     }
-    if (grantpt(state.virt_master_fd) < 0 || unlockpt(state.virt_master_fd) < 0) {
-        close(state.real_fd);
-        close(state.virt_master_fd);
-        state.real_fd = -1;
-        state.virt_master_fd = -1;
+    if (grantpt(proxy->virt_master_fd) < 0 || unlockpt(proxy->virt_master_fd) < 0) {
+        close(proxy->real_fd);
+        close(proxy->virt_master_fd);
+        proxy_state_init(proxy);
         return -1;
     }
 
-    char *virt_tty = ptsname(state.virt_master_fd);
+    char *virt_tty = ptsname(proxy->virt_master_fd);
     if (!virt_tty) {
-        close(state.real_fd);
-        close(state.virt_master_fd);
-        state.real_fd = -1;
-        state.virt_master_fd = -1;
+        close(proxy->real_fd);
+        close(proxy->virt_master_fd);
+        proxy_state_init(proxy);
         return -1;
     }
 
-    state.virt_tty_path = strdup(virt_tty);
-    state.virt_slave_fd = open(state.virt_tty_path, O_RDWR | O_NOCTTY);
-    if (state.virt_slave_fd < 0) {
-        free(state.virt_tty_path);
-        state.virt_tty_path = NULL;
-        close(state.real_fd);
-        close(state.virt_master_fd);
-        state.real_fd = -1;
-        state.virt_master_fd = -1;
+    proxy->virt_tty_path = strdup(virt_tty);
+    if (!proxy->virt_tty_path) {
+        close(proxy->real_fd);
+        close(proxy->virt_master_fd);
+        proxy_state_init(proxy);
         return -1;
     }
 
-    if (configure_serial_fd(state.virt_slave_fd, 0) != 0) {
-        close(state.real_fd);
-        close(state.virt_master_fd);
-        close(state.virt_slave_fd);
-        free(state.virt_tty_path);
-        state.real_fd = -1;
-        state.virt_master_fd = -1;
-        state.virt_slave_fd = -1;
-        state.virt_tty_path = NULL;
+    proxy->virt_slave_fd = open(proxy->virt_tty_path, O_RDWR | O_NOCTTY);
+    if (proxy->virt_slave_fd < 0) {
+        free(proxy->virt_tty_path);
+        proxy_state_init(proxy);
         return -1;
     }
 
-    state.cb_context = cb_context;
-    state.data_cb = data_cb;
-    state.lifecycle_cb = lifecycle_cb;
-    state.stop_requested = 0;
+    if (configure_serial_fd(proxy->virt_slave_fd, 0) != 0) {
+        close(proxy->real_fd);
+        close(proxy->virt_master_fd);
+        close(proxy->virt_slave_fd);
+        free(proxy->virt_tty_path);
+        proxy_state_init(proxy);
+        return -1;
+    }
 
-    if (state.lifecycle_cb) {
-        // Inform caller that proxy has been initialized and provide the virt path
-        state.lifecycle_cb(state.cb_context, PICO_SERIAL_PROXY_EVENT_STARTED, state.virt_tty_path);
+    proxy->cb_context = cb_context;
+    proxy->data_cb = data_cb;
+    proxy->lifecycle_cb = lifecycle_cb;
+    proxy->stop_requested = 0;
+
+    if (proxy->lifecycle_cb) {
+        proxy->lifecycle_cb(proxy->cb_context, PICO_SERIAL_PROXY_EVENT_STARTED, proxy->virt_tty_path);
     }
 
     return 0;
 }
 
-const char *pico_serial_proxy_get_virt_tty(void) {
-    return state.virt_tty_path;
+const char *pico_serial_proxy_get_virt_tty(const pico_serial_proxy_t *proxy) {
+    return proxy ? proxy->virt_tty_path : NULL;
 }
 
-void pico_serial_proxy_shutdown(void) {
-    if (state.real_fd >= 0) { close(state.real_fd); state.real_fd = -1; }
-    if (state.virt_master_fd >= 0) { close(state.virt_master_fd); state.virt_master_fd = -1; }
-    if (state.virt_slave_fd >= 0) { close(state.virt_slave_fd); state.virt_slave_fd = -1; }
-    if (state.virt_tty_path) { free(state.virt_tty_path); state.virt_tty_path = NULL; }
+void pico_serial_proxy_shutdown(pico_serial_proxy_t *proxy) {
+    if (!proxy) {
+        return;
+    }
+
+    if (proxy->real_fd >= 0) {
+        close(proxy->real_fd);
+    }
+    if (proxy->virt_master_fd >= 0) {
+        close(proxy->virt_master_fd);
+    }
+    if (proxy->virt_slave_fd >= 0) {
+        close(proxy->virt_slave_fd);
+    }
+    if (proxy->virt_tty_path) {
+        free(proxy->virt_tty_path);
+    }
+
+    proxy_state_init(proxy);
 }
 
-int pico_serial_proxy_run(void) {
-    if (state.real_fd < 0 || state.virt_master_fd < 0 || state.data_cb == NULL) {
+int pico_serial_proxy_run(pico_serial_proxy_t *proxy) {
+    if (!proxy || proxy->real_fd < 0 || proxy->virt_master_fd < 0 || proxy->data_cb == NULL) {
         errno = EINVAL;
         return -1;
     }
 
     printf("Proxy active.\n");
     printf("Real Device:   %s\n", "(real device)");
-    if (state.virt_tty_path) {
-        printf("Virtual TTY:   %s\n", state.virt_tty_path);
+    if (proxy->virt_tty_path) {
+        printf("Virtual TTY:   %s\n", proxy->virt_tty_path);
         printf("Connect your application to the Virtual TTY.\n\n");
     }
 
     char buffer[BUFFER_SIZE];
     fd_set read_fds;
-    int max_fd = (state.real_fd > state.virt_master_fd) ? state.real_fd : state.virt_master_fd;
+    int max_fd = (proxy->real_fd > proxy->virt_master_fd) ? proxy->real_fd : proxy->virt_master_fd;
 
     const char *stop_reason = "shutdown";
-    while (!state.stop_requested) {
+    while (!proxy->stop_requested) {
         FD_ZERO(&read_fds);
-        FD_SET(state.real_fd, &read_fds);
-        FD_SET(state.virt_master_fd, &read_fds);
+        FD_SET(proxy->real_fd, &read_fds);
+        FD_SET(proxy->virt_master_fd, &read_fds);
 
         int ready = select(max_fd + 1, &read_fds, NULL, NULL, NULL);
         if (ready < 0) {
             if (errno == EINTR) {
-                if (state.stop_requested) {
+                if (proxy->stop_requested) {
                     stop_reason = "requested stop";
                     break;
                 }
                 continue;
             }
-            if (state.lifecycle_cb) {
-                state.lifecycle_cb(state.cb_context, PICO_SERIAL_PROXY_EVENT_ERROR, strerror(errno));
+            if (proxy->lifecycle_cb) {
+                proxy->lifecycle_cb(proxy->cb_context, PICO_SERIAL_PROXY_EVENT_ERROR, strerror(errno));
             }
             perror("Select error");
             break;
         }
 
-        if (FD_ISSET(state.real_fd, &read_fds)) {
-            ssize_t bytes_read = read(state.real_fd, buffer, sizeof(buffer));
+        if (FD_ISSET(proxy->real_fd, &read_fds)) {
+            ssize_t bytes_read = read(proxy->real_fd, buffer, sizeof(buffer));
             if (bytes_read <= 0) {
                 if (bytes_read < 0) {
-                    if (state.lifecycle_cb) state.lifecycle_cb(state.cb_context, PICO_SERIAL_PROXY_EVENT_ERROR, strerror(errno));
+                    if (proxy->lifecycle_cb) proxy->lifecycle_cb(proxy->cb_context, PICO_SERIAL_PROXY_EVENT_ERROR, strerror(errno));
                     perror("Read error from real device");
                 }
                 break;
             }
-            // Notify callback: device -> host (host_to_device = false)
-            state.data_cb(state.cb_context, false, (const uint8_t *)buffer, (size_t)bytes_read);
-            if (write_all(state.virt_master_fd, buffer, (size_t)bytes_read) < 0) {
-                if (state.lifecycle_cb) state.lifecycle_cb(state.cb_context, PICO_SERIAL_PROXY_EVENT_ERROR, strerror(errno));
+            proxy->data_cb(proxy->cb_context, false, (const uint8_t *)buffer, (size_t)bytes_read);
+            if (write_all(proxy->virt_master_fd, buffer, (size_t)bytes_read) < 0) {
+                if (proxy->lifecycle_cb) proxy->lifecycle_cb(proxy->cb_context, PICO_SERIAL_PROXY_EVENT_ERROR, strerror(errno));
                 perror("Write error to virtual PTY");
                 break;
             }
         }
 
-        if (FD_ISSET(state.virt_master_fd, &read_fds)) {
-            ssize_t bytes_read = read(state.virt_master_fd, buffer, sizeof(buffer));
+        if (FD_ISSET(proxy->virt_master_fd, &read_fds)) {
+            ssize_t bytes_read = read(proxy->virt_master_fd, buffer, sizeof(buffer));
             if (bytes_read <= 0) {
                 if (bytes_read < 0) {
-                    if (state.lifecycle_cb) state.lifecycle_cb(state.cb_context, PICO_SERIAL_PROXY_EVENT_ERROR, strerror(errno));
+                    if (proxy->lifecycle_cb) proxy->lifecycle_cb(proxy->cb_context, PICO_SERIAL_PROXY_EVENT_ERROR, strerror(errno));
                     perror("Read error from virtual PTY");
                 }
                 break;
             }
-            // Notify callback: host -> device (host_to_device = true)
-            state.data_cb(state.cb_context, true, (const uint8_t *)buffer, (size_t)bytes_read);
-            if (write_all(state.real_fd, buffer, (size_t)bytes_read) < 0) {
-                if (state.lifecycle_cb) state.lifecycle_cb(state.cb_context, PICO_SERIAL_PROXY_EVENT_ERROR, strerror(errno));
+            proxy->data_cb(proxy->cb_context, true, (const uint8_t *)buffer, (size_t)bytes_read);
+            if (write_all(proxy->real_fd, buffer, (size_t)bytes_read) < 0) {
+                if (proxy->lifecycle_cb) proxy->lifecycle_cb(proxy->cb_context, PICO_SERIAL_PROXY_EVENT_ERROR, strerror(errno));
                 perror("Write error to real device");
                 break;
             }
         }
     }
-    if (state.lifecycle_cb) state.lifecycle_cb(state.cb_context, PICO_SERIAL_PROXY_EVENT_STOPPED, stop_reason);
-    pico_serial_proxy_shutdown();
+
+    if (proxy->lifecycle_cb) {
+        proxy->lifecycle_cb(proxy->cb_context, PICO_SERIAL_PROXY_EVENT_STOPPED, stop_reason);
+    }
+    pico_serial_proxy_shutdown(proxy);
     return 0;
 }
 
-void pico_serial_proxy_request_stop(void) {
-    state.stop_requested = 1;
+void pico_serial_proxy_request_stop(pico_serial_proxy_t *proxy) {
+    if (!proxy) {
+        return;
+    }
+    proxy->stop_requested = 1;
 }
