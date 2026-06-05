@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Implementation of a small PTY <-> real tty proxy with data callbacks.
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
+#ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700
+#endif
 
 #include "../include/pico-serial-proxy.h"
 
