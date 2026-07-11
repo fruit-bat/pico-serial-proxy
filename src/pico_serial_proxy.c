@@ -218,8 +218,9 @@ int pico_serial_proxy_run(pico_serial_proxy_t *proxy) {
     if (proxy->virt_tty_path) {
         printf("Virtual TTY:   %s\n", proxy->virt_tty_path);
         printf("Connect your application to the Virtual TTY.\n\n");
+        printf("HOST<->DEV\n");
     }
-
+    
     char buffer[BUFFER_SIZE];
     fd_set read_fds;
     int max_fd = (proxy->real_fd > proxy->virt_master_fd) ? proxy->real_fd : proxy->virt_master_fd;
