@@ -11,17 +11,22 @@
 extern "C" {
 #endif
 
+typedef enum {
+    PICO_SERIAL_PROXY_DIRECTION_HOST_TO_DEVICE = 0,
+    PICO_SERIAL_PROXY_DIRECTION_DEVICE_TO_HOST = 1,
+} pico_serial_proxy_direction_t;
+
 /**
  * Callback invoked when the proxy forwards data in either direction.
  *
  * @param context User-provided opaque context.
- * @param host_to_device True when data is moving from the virtual PTY to the real device.
+ * @param direction Direction of the data flow.
  * @param data Byte buffer containing forwarded data.
  * @param len Number of bytes in the data buffer.
  */
 typedef void (*pico_serial_proxy_data_cb_t)(
     void *context,
-    bool host_to_device,
+    pico_serial_proxy_direction_t direction,
     const uint8_t *data,
     size_t len
 );
