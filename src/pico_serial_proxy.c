@@ -256,11 +256,17 @@ int pico_serial_proxy_run(pico_serial_proxy_t *proxy) {
                 }
                 break;
             }
-            proxy->data_cb(proxy->cb_context, false, (const uint8_t *)buffer, (size_t)bytes_read);
             if (write_all(proxy->virt_master_fd, buffer, (size_t)bytes_read) < 0) {
                 if (proxy->lifecycle_cb) proxy->lifecycle_cb(proxy->cb_context, PICO_SERIAL_PROXY_EVENT_ERROR, strerror(errno));
                 perror("Write error to virtual PTY");
                 break;
+            }
+            else {
+                proxy->data_cb(
+                    proxy->cb_context, 
+                    PICO_SERIAL_PROXY_DIRECTION_DEVICE_TO_HOST, 
+                    (const uint8_t *)buffer, 
+                    (size_t)bytes_read);
             }
         }
 
@@ -273,11 +279,17 @@ int pico_serial_proxy_run(pico_serial_proxy_t *proxy) {
                 }
                 break;
             }
-            proxy->data_cb(proxy->cb_context, true, (const uint8_t *)buffer, (size_t)bytes_read);
             if (write_all(proxy->real_fd, buffer, (size_t)bytes_read) < 0) {
                 if (proxy->lifecycle_cb) proxy->lifecycle_cb(proxy->cb_context, PICO_SERIAL_PROXY_EVENT_ERROR, strerror(errno));
                 perror("Write error to real device");
                 break;
+            }
+            else {
+                proxy->data_cb(
+                    proxy->cb_context, 
+                    PICO_SERIAL_PROXY_DIRECTION_HOST_TO_DEVICE, 
+                    (const uint8_t *)buffer, 
+                    (size_t)bytes_read);
             }
         }
     }
